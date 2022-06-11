@@ -5,6 +5,7 @@ import numpy as np
 import Utils as utils
 from statistics import mean
 from scipy import optimize
+import random
 
 def get_burn_rate(pressure):
     a = 0
@@ -27,7 +28,9 @@ def get_burn_rate(pressure):
         a = 9.653
         b = 0.064
     else:
-        raise Exception("Pressão na câmara acima do intervalo conhecido")
+        #raise Exception("Pressão na câmara acima do intervalo conhecido")
+        a = 9.653
+        b = 0.064
     return (a*(pressure/1000000)**b)/1000
 
 def get_bates_burning_area(inner_diam, outer_diam, length,no_grains = 1):
@@ -56,6 +59,10 @@ def get_coef_thrust(k, exit_pressure, chamber_pressure, exit_area, ambient_press
 def get_thrust(thrust_coef, throat_area, chamber_pressure):
     return thrust_coef*throat_area*chamber_pressure
 
+def get_mass_flux(burn_rate, surface_area, d, rho):
+    return burn_rate*surface_area*rho/(utils.get_circ_area(d))
+
+
 # Funções para alterar a geometria dos grãos ou área da garganta
 def set_outer_diam(new_D):
     global D
@@ -80,11 +87,11 @@ def set_throat_diam(new_dstar):
 
 
 # Parâmetros do motor
-D = 0.038                                       # Diâmetro externo (m)
-d = 0.015                                       # Diâmetro interno (m)
-L = 0.05                                       # Comprimento do grão (m)
-A_t= np.pi*(0.01/2)**2                         # Área da garganta (m^2)
-N = 4                                           # Número de grãos 
+D = 0.03738                                       # Diâmetro externo (m)
+d = 0.015                                         # Diâmetro interno (m)
+L = 0.05                                          # Comprimento do grão (m)
+A_t= np.pi*(0.01/2)**2                            # Área da garganta (m^2)
+N = 4                                             #  Número de grãos 
 
 
 # Parâmetros do propelente
@@ -99,16 +106,21 @@ ambient_pressure = 101325                       # Pressão a nível do mar (Pa)
 propelant_mass = N*np.pi *(D**2 - d**2)*L * knsb['rho']/4
 
 
-def simulate_nozzle(D, d, L, A_t, N, ambient_pressure = 101325):
+def simulate_nozzle(params):
+    global ambient_pressure
+    d, L, d_t = params
+    A_t = np.pi*(d_t/2)**2
     cur_diam = d                                                    # Diâmetro atual
     cur_length = L                                                  # Comprimento atual
     cur_pressure = ambient_pressure                                 # Pressão atual
     it = 0                                                          # Iteração
+    N = 4
+    D = 0.03664
     burning_area = [get_bates_burning_area(cur_diam, D, L, N)]      # Dados de superfície exposta
     kn = [burning_area[0]/A_t]                                      # Dados de Kn
     chamber_pressure = [ambient_pressure]                           # Dados de pressão na câmara
-    timestep = 0.001                                                # Passo de simulação
-
+    timestep = 0.01                                                 # Passo de simulação
+    mass_flow = [0]
     # Loop de queima
     while (True):
         r = get_burn_rate(cur_pressure)
@@ -120,10 +132,8 @@ def simulate_nozzle(D, d, L, A_t, N, ambient_pressure = 101325):
         cur_pressure = get_chamber_pressure(get_kn(A_t,burning_area[-1]), knsb['rho'], r, knsb['c_star'])
         chamber_pressure.append(cur_pressure)
         kn.append(burning_area[-1]/A_t)
+        mass_flow.append(get_mass_flux(r, burning_area[-1], cur_diam, knsb['rho']))
         it = it + 1
-
-    # Condição de contorno:
-    kn[-1] = 0
 
     # Listas de plot
     time =     np.linspace(0, it*timestep, it + 1)
@@ -143,18 +153,61 @@ def simulate_nozzle(D, d, L, A_t, N, ambient_pressure = 101325):
         thrust_coef.append(get_coef_thrust(knsb['k'], pe[-1], i, ae, ambient_pressure, A_t))
         thrust.append(get_thrust(thrust_coef[-1], A_t, i))
    
-    print("Tempo de queima: ", timestep*it,"s")
+    burn_time = timestep*it
+    total_impulse = mean(thrust)*timestep*it
+
+
+    print("Tempo de queima: ", burn_time,"s")
     print("Razão de expansão ideal: ",ae_at)
     print("Diâmetro de saída: ", utils.get_circ_diam(ae)*1e3,"mm")
-    print("Coeficiente de empuxo médio: ",mean(thrust_coef))
     print("Coeficiente de empuxo ideal: ", get_coef_thrust(knsb['k'], ambient_pressure, chamber_avg, ae, ambient_pressure, A_t))
-    print("Eficiência do bocal: ", mean(thrust_coef)*100/get_coef_thrust(knsb['k'], ambient_pressure, chamber_avg, ae, ambient_pressure, A_t))
-    print("Impulso total: ", mean(thrust)*timestep*it,"Ns" )
+    print("Impulso total: ", total_impulse,"Ns" )
+    print("Fluxo de massa máx.: ", max(mass_flow),"Ns" )
+    print("--------")
+    return burning_area, chamber_pressure, kn, pe, thrust_coef, thrust, burn_time, total_impulse, mass_flow, time, pressure
 
-    return burning_area, chamber_pressure, kn, pe, thrust_coef, thrust, time, pressure
+
+## Funções de otimização
+def optimize_total_impulse(params):
+    _, _, _, _, _, _, _, total_impulse,_, _, _= simulate_nozzle(params)
+    return abs(total_impulse - 620)
+
+def restraint_mean_pressure(params):
+    _, chamber_pressure, _, _,_,_,_,_,_,_,_ = simulate_nozzle(params)
+    return 1e6 - abs(8.03e6 - mean(chamber_pressure))
+
+def restraint_peak_pressure(params):
+    _, chamber_pressure, _, _,_,_,_,_,_,_,_ = simulate_nozzle(params)
+    return 10.68e6 - max(chamber_pressure)
+
+def restraint_kn_variation(params):
+    _, _, kn, _,_,_,_,_,_,_,_ = simulate_nozzle(params)
+    return 0.2 - (max(kn) - min(kn))/(max(kn))
+
+def restraint_port_ratio(params):
+    d, L, d_t = params
+    port_area = np.pi*d**2/4
+    throat_area = np.pi*d_t**2/4
+    return (port_area/throat_area - 2)
+
+def restraint_mass_flux(params):
+    _, _, _, _,_,_,_,_,mass_flux,_,_ = simulate_nozzle(params)
+    return 1406 - max(mass_flux)
 
 
-burning_area, chamber_pressure, kn, pe, thrust_coef, thrust, time, pressure = simulate_nozzle(D, d, L, A_t, N)
+# Otimiza um motor com um impulso total como objetivo e restrições
+def optimize_for_impulse():
+    constraint = [{'type' : 'ineq', 'fun' : restraint_mean_pressure},                 # Restrição de design #1 pressão média prox de 8.55e6 Pa
+                  {'type' : 'ineq', 'fun' : restraint_port_ratio},                    # Restrição de design #2 Port/Throat > 2 
+                  {'type' : 'ineq', 'fun' : restraint_peak_pressure},                 # Pressão máx. < 11.37e6 Pa
+                  {'type' : 'ineq', 'fun' : restraint_kn_variation},                  # Restrição de Kn no máx 15%
+                  {'type' : 'ineq', 'fun' : restraint_mass_flux}]                     # Restrição de design #3 fluxo de massa máx. 2 lb/sqin/s
+    bounds = ((0.005, 0.03664), (0.01, 0.5), (0.003, 0.02))
+    a = optimize.minimize(optimize_total_impulse, [random.uniform(0.005, 0.03664), random.uniform(0.01, 0.5), random.uniform(0.003, 0.02)], bounds=bounds, constraints=constraint ) 
+  
+    
+optimize_for_impulse()
+
 
 # Taxa de queima vs pressão (KNSB)
 f= plot.figure()
@@ -164,7 +217,7 @@ plot.plot(pressure, list(map(get_burn_rate, pressure)))
 plot.xlabel("Pressure (Pa)")
 plot.ylabel("Burn rate (m/s)")
 plot.grid()
-
+ 
 
 # Kn vs tempo
 f= plot.figure()
