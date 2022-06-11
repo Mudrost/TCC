@@ -29,6 +29,7 @@ def get_burn_rate(pressure):
         b = 0.064
     else:
         #raise Exception("Pressão na câmara acima do intervalo conhecido")
+        # Para evitar problemas com a otimização, manter mesmas constantes, mas verificar se a pressão superou 1550 psi
         a = 9.653
         b = 0.064
     return (a*(pressure/1000000)**b)/1000
@@ -91,7 +92,7 @@ D = 0.03738                                       # Diâmetro externo (m)
 d = 0.015                                         # Diâmetro interno (m)
 L = 0.05                                          # Comprimento do grão (m)
 A_t= np.pi*(0.01/2)**2                            # Área da garganta (m^2)
-N = 4                                             #  Número de grãos 
+N = 6                                            #  Número de grãos 
 
 
 # Parâmetros do propelente
@@ -108,18 +109,18 @@ propelant_mass = N*np.pi *(D**2 - d**2)*L * knsb['rho']/4
 
 def simulate_nozzle(params):
     global ambient_pressure
+    global N
     d, L, d_t = params
     A_t = np.pi*(d_t/2)**2
     cur_diam = d                                                    # Diâmetro atual
     cur_length = L                                                  # Comprimento atual
     cur_pressure = ambient_pressure                                 # Pressão atual
     it = 0                                                          # Iteração
-    N = 4
     D = 0.03664
     burning_area = [get_bates_burning_area(cur_diam, D, L, N)]      # Dados de superfície exposta
     kn = [burning_area[0]/A_t]                                      # Dados de Kn
     chamber_pressure = [ambient_pressure]                           # Dados de pressão na câmara
-    timestep = 0.01                                                 # Passo de simulação
+    timestep = 0.02                                                 # Passo de simulação
     mass_flow = [0]
     # Loop de queima
     while (True):
@@ -174,11 +175,11 @@ def optimize_total_impulse(params):
 
 def restraint_mean_pressure(params):
     _, chamber_pressure, _, _,_,_,_,_,_,_,_ = simulate_nozzle(params)
-    return 1e6 - abs(8.03e6 - mean(chamber_pressure))
+    return 1.5e6 - abs(8.03e6 - mean(chamber_pressure))
 
 def restraint_peak_pressure(params):
     _, chamber_pressure, _, _,_,_,_,_,_,_,_ = simulate_nozzle(params)
-    return 10.68e6 - max(chamber_pressure)
+    return 8.03e6 - max(chamber_pressure)
 
 def restraint_kn_variation(params):
     _, _, kn, _,_,_,_,_,_,_,_ = simulate_nozzle(params)
@@ -192,7 +193,7 @@ def restraint_port_ratio(params):
 
 def restraint_mass_flux(params):
     _, _, _, _,_,_,_,_,mass_flux,_,_ = simulate_nozzle(params)
-    return 1406 - max(mass_flux)
+    return 1300 - max(mass_flux)
 
 
 # Otimiza um motor com um impulso total como objetivo e restrições
@@ -202,9 +203,20 @@ def optimize_for_impulse():
                   {'type' : 'ineq', 'fun' : restraint_peak_pressure},                 # Pressão máx. < 11.37e6 Pa
                   {'type' : 'ineq', 'fun' : restraint_kn_variation},                  # Restrição de Kn no máx 15%
                   {'type' : 'ineq', 'fun' : restraint_mass_flux}]                     # Restrição de design #3 fluxo de massa máx. 2 lb/sqin/s
-    bounds = ((0.005, 0.03664), (0.01, 0.5), (0.003, 0.02))
-    a = optimize.minimize(optimize_total_impulse, [random.uniform(0.005, 0.03664), random.uniform(0.01, 0.5), random.uniform(0.003, 0.02)], bounds=bounds, constraints=constraint ) 
-  
+    bounds = ((0.01, 0.03664), (0.1, 0.225), (0.005, 0.015))
+    it = 0
+    while (True):
+        initial_guess = [random.uniform(0.01, 0.03664), random.uniform (0.1, 0.225), random.uniform(0.005, 0.015)]
+        a = optimize.minimize(optimize_total_impulse, initial_guess, bounds=bounds, constraints=constraint ) 
+        if a.success and a.fun < 50:
+            print(initial_guess)
+            a
+            break
+        elif it > 1000:
+            global N
+            N = N+1
+        it = it + 1
+        print(it)
     
 optimize_for_impulse()
 
